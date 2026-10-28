@@ -40,9 +40,37 @@ class ProductFactory:
         values: float,
         **kwargs: Any,
     ) -> ProductRFRSwap:
+        """HW6 task 3: fixed vs compounded overnight swap from a convention.
 
-        #TODO
-        pass
+        ``values`` is the quote: the swap's fixed rate (decimal).
+        kwargs: notional (default 1e4, as create_fra), pay_or_rec ('receive' =
+        receive fixed / pay floating), spread on the floating leg (default 0).
+        """
+        bdc = data_convention.business_day_convention
+        holidays = data_convention.holiday_convention
+        effective_date, term_or_termination = cls._resolve_swap_dates(value_date, axis1, bdc, holidays)
+        # Every contractual field is read from the convention's typed accessors,
+        # which wrap the convention's own string tokens ("SOFR-1B", "1Y", "2D",
+        # "F", "USGS", ...).  The product therefore serializes to exactly the same
+        # dict as one built by hand from those tokens -- the notebook checks this
+        # (direct.serialize() == created.serialize()).
+        accrual_period = data_convention.acc_period
+        return ProductRFRSwap(
+            effective_date,
+            term_or_termination,
+            data_convention.payment_offset,
+            data_convention.index_str,
+            values,                                            # quote = fixed rate
+            PayOrReceive.from_string(kwargs.get("pay_or_rec", "receive")),
+            kwargs.get("notional", 1e4),
+            accrual_period,
+            data_convention.acc_basis,
+            accrual_period,                                    # one ACCRUAL_PERIOD in the convention -> both legs
+            bdc,
+            holidays,
+            kwargs.get("spread", 0.0),
+            data_convention.compounding_method,
+        )
 
     @classmethod
     def create_overnight_index_basis_swap(
@@ -53,9 +81,60 @@ class ProductFactory:
         values: float,
         **kwargs: Any,
     ) -> ProductOvernightIndexBasisSwap:
+        """HW6 task 4: overnight index basis swap from a convention.
 
-        #TODO
-        pass
+        ``values`` is the quote: the spread added to leg 1 (decimal).  Leg 1 is the
+        convention's BASIS_OI_INDEX and leg 2 its REFERENCE_OI_INDEX.
+        kwargs: notional (default 1e4); direction as pay_or_rec_leg_1, or the
+        generic pay_or_rec the dispatcher passes for every product
+        ('receive' = receive leg 1 / pay leg 2).
+        """
+        bdc = data_convention.business_day_convention
+        holidays = data_convention.holiday_convention
+        effective_date, term_or_termination = cls._resolve_swap_dates(value_date, axis1, bdc, holidays)
+        direction = kwargs.get("pay_or_rec_leg_1", kwargs.get("pay_or_rec", "receive"))
+        return ProductOvernightIndexBasisSwap(
+            effective_date,
+            term_or_termination,
+            data_convention.payment_offset,
+            data_convention.index_1_str,
+            data_convention.index_2_str,
+            values,                                            # quote = spread over leg 1
+            PayOrReceive.from_string(direction),
+            kwargs.get("notional", 1e4),
+            data_convention.acc_period_1,
+            data_convention.acc_basis,
+            data_convention.acc_period_2,
+            bdc,
+            holidays,
+            data_convention.compounding_method,
+        )
+
+    @classmethod
+    def _resolve_swap_dates(cls, value_date, axis1, bdc, holidays):
+        """Map a swap axis1 to (effective date, TermOrDate end), both swap types.
+
+        Swap rule (unlike the FRA, whose two offsets are both measured from
+        value_date):
+          * "1Y"                     spot start: effective = value_date, end = 1Y from it
+          * "3Mx1Y"                  forward start: effective = value_date + 3M
+                                     (rolled bdc/holidays), then RUN for 1Y
+          * "2026-04-02x2027-04-02"  explicit start and end dates
+          * "2026-04-02x1Y"          explicit start, then run for 1Y
+        The end is passed on as a TermOrDate, unresolved.  The swap constructor
+        rolls a tenor on its index calendar, and serializes the tenor as written,
+        so "1Y" stays "1Y" (not a date).  "Spot" here is the value date itself:
+        the conventions carry no settlement lag, and the product constructor rolls
+        a non-business effective date forward.
+        """
+        start, end = cls._tokenize_axis1(axis1)
+        if end is None:
+            return value_date, start
+        if start.is_term():
+            effective_date = add_period(value_date, start.get_term(), bdc, holidays)
+        else:
+            effective_date = start.get_date()
+        return effective_date, end
 
     @classmethod
     def create_fra(cls, value_date, axis1, data_convention, values, **kwargs):

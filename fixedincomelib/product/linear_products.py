@@ -529,7 +529,54 @@ class ProductRFRSwap(Product):
         )
         self.compounding_method_ = compounding_method
 
-        #TODO
+        # HW6 task 1: build the two legs as InterestRateStreams.
+        #
+        # Both legs share every schedule/payment setting; they differ only in
+        # their accrual period and in what each coupon pays.  The shared settings
+        # follow the template's own leg builder (floating_leg_1_wo_basis on the
+        # basis swap below):
+        #   * accrual schedule rolled with the payment BDC on the INDEX's fixing
+        #     calendar -- the overnight coupons observe that calendar, so the
+        #     accrual boundaries should be its business days;
+        #   * payment = accrual end + payment offset (e.g. 2D), rolled with the
+        #     payment BDC/holidays.
+        # Using one calendar for both legs keeps the fixed and floating
+        # schedules aligned whenever their accrual periods are equal.
+        #
+        # Legs carry the contractual notional UNSIGNED by pay/receive.  The
+        # direction lives in pay_or_rec_ only, and the valuation engine applies
+        # +1/-1 per leg; signing the legs here as well would flip them twice.
+        index_holidays = HolidayConvention(self.on_index_.fixingCalendar().name())
+        shared_leg_terms = dict(
+            effective_date=self.effective_date_,
+            termination_date=self.termination_date_,
+            notional=self.notional_,
+            currency=self.currency_,
+            accrual_basis=self.accrual_basis_,
+            business_day_convention=self.pay_business_day_convention_,
+            holiday_convention=index_holidays,
+            payment_offset=self.pay_offset_,
+            payment_business_day_convention=self.pay_business_day_convention_,
+            payment_holiday_convention=self.pay_holiday_convention_,
+        )
+        # Fixed leg: each coupon pays N * K * alpha (alpha under the leg's accrual basis).
+        self.fixed_leg_ = InterestRateStream(
+            **shared_leg_terms,
+            accrual_period=self.accrual_period_,
+            fixed_rate=self.fixed_rate_,
+        )
+        # Floating leg: each coupon pays N * alpha * (R + s), where R compounds
+        # the daily overnight fixings observed over the coupon (in arrears) and
+        # the spread s is added OUTSIDE the compounding (stream convention).
+        self.floating_leg_ = InterestRateStream(
+            **shared_leg_terms,
+            accrual_period=self.floating_leg_accrual_period_,
+            float_index=self.on_index_str_,
+            is_on_index=True,
+            ois_compounding=self.compounding_method_,
+            ois_spread=self.spread_,
+            fixing_in_arrear=True,
+        )
 
         last_dt_fixed = self.fixed_leg_.last_date
         last_dt_floating = self.floating_leg_.last_date
@@ -727,12 +774,60 @@ class ProductOvernightIndexBasisSwap(Product):
 
         self.floating_leg_1_basis_ = None
         self.floating_leg_1_wo_basis_ = None
-        #TODO
+
+        # HW6 task 2: build both overnight legs.
+        #
+        # Leg 1 is "index 1 + spread"; leg 2 is "index 2" flat.  Each leg is
+        # generated on its OWN index's fixing calendar with its OWN accrual
+        # period, because each one compounds its own overnight fixings.
+        #
+        # Leg 1 deliberately mirrors the template property floating_leg_1_wo_basis
+        # argument-for-argument and differs only in ois_spread.  The valuation
+        # engine prices leg 1 as (index without spread) + (a fixed stream paying the
+        # spread), via floating_leg_1_wo_basis and floating_leg_1_basis.  That
+        # decomposition equals the PV of this leg only if the three streams share
+        # one schedule and one payment calendar, so any drift in these arguments
+        # would silently break  PV(engine) == PV(leg 1) - PV(leg 2).
+        #
+        # Notionals are unsigned by pay/receive; the engine applies the leg signs.
+        self.floating_leg_1_ = self._overnight_leg(
+            self.on_index_str_1_, self.on_index_1_, self.accrual_period_1_, spread=self.spread_,
+        )
+        self.floating_leg_2_ = self._overnight_leg(
+            self.on_index_str_2_, self.on_index_2_, self.accrual_period_2_, spread=0.0,
+        )
 
         last_dt_floating_1 = self.floating_leg_1_.last_date
         last_dt_floating_2 = self.floating_leg_2_.last_date
         self.last_date_ = (
             last_dt_floating_2 if last_dt_floating_2 >= last_dt_floating_1 else last_dt_floating_1
+        )
+
+    def _overnight_leg(self, index_str: str, index, accrual_period: Period,
+                       spread: float) -> InterestRateStream:
+        """One compounded overnight leg, on the same terms as floating_leg_1_wo_basis.
+
+        Accrual dates: rolled with the payment BDC on the index's fixing
+        calendar.  Payments: accrual end + payment offset, rolled with the payment
+        BDC/holidays.  Coupons: N * alpha_index * (R_compounded + spread).
+        """
+        return InterestRateStream(
+            effective_date=self.effective_date_,
+            termination_date=self.termination_date_,
+            accrual_period=accrual_period,
+            notional=self.notional_,
+            currency=self.currency_,
+            accrual_basis=self.accrual_basis_,
+            business_day_convention=self.pay_business_day_convention_,
+            holiday_convention=HolidayConvention(index.fixingCalendar().name()),
+            float_index=index_str,
+            is_on_index=True,
+            ois_compounding=self.compounding_method_,
+            ois_spread=spread,
+            fixing_in_arrear=True,
+            payment_offset=self.pay_offset_,
+            payment_business_day_convention=self.pay_business_day_convention_,
+            payment_holiday_convention=self.pay_holiday_convention_,
         )
 
     def floating_leg_1_cash_flow(self, i: int) -> Product:

@@ -160,8 +160,21 @@ class ValuationEngineProductRfrSwap(ValuationEngineProduct):
         self.floating_leg_engine_ = ValuationEngineInterestRateStream(model, valuation_parameters_collection, product.floating_leg, request)
 
     def calculate_value(self):
-        #TODO
-        pass
+        # HW6 task 5.  A swap is a linear combination of its legs:
+        #   PV_swap   = s_fix * PV_fixed + s_flt * PV_floating
+        #   cash_swap = s_fix * cash_fixed + s_flt * cash_floating
+        # with (s_fix, s_flt) = (+1, -1) for receive-fixed and (-1, +1) for pay
+        # (set in __init__).  Each leg engine values every coupon from the value
+        # date: past coupons drop out, coupons paid today count as cash, and future
+        # coupons are projected on the index curve and discounted on the funding
+        # curve.  The swap only has to sign and add -- the same structure as
+        # the FRA engine below.
+        self.fixed_leg_engine_.calculate_value()
+        self.floating_leg_engine_.calculate_value()
+        self.value_ = (self.fixed_leg_sign_ * self.fixed_leg_engine_.value
+                       + self.floating_leg_sign_ * self.floating_leg_engine_.value)
+        self.cash_ = (self.fixed_leg_sign_ * self.fixed_leg_engine_.cash
+                      + self.floating_leg_sign_ * self.floating_leg_engine_.cash)
 
     def create_cash_flows_report(self):
         return _combine_cashflow_reports([
@@ -215,8 +228,21 @@ class ValuationEngineProductOvernightIndexBasisSwap(ValuationEngineProduct):
                 ("Leg 2 index", self.floating_leg_2_sign_, self.floating_leg_2_engine_)]
 
     def calculate_value(self):
-        #TODO
-        pass
+        # HW6 task 6.  Three signed components, as listed by _legs():
+        #   leg-1 index (no spread)   sign s1
+        #   leg-1 spread stream       sign s1   (a fixed stream paying the spread)
+        #   leg-2 index               sign s2 = -s1
+        # Since a leg-1 coupon pays N*alpha*(R1 + s) with s outside the compounding,
+        # it splits exactly into N*alpha*R1 + N*alpha*s.  The two leg-1 components
+        # therefore sum to the leg-1 PV, and the total is s1*PV(leg 1) + s2*PV(leg 2).
+        # Cash combines the same way.  Iterating over _legs() (the same list the
+        # cashflow report uses) keeps value and report in step by construction.
+        self.value_ = 0.0
+        self.cash_ = 0.0
+        for _name, sign, engine in self._legs():
+            engine.calculate_value()
+            self.value_ += sign * engine.value
+            self.cash_ += sign * engine.cash
 
     def create_cash_flows_report(self):
         return _combine_cashflow_reports(self._legs())
